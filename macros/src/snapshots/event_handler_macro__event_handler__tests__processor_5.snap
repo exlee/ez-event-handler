@@ -1,0 +1,80 @@
+---
+source: macros/src/event_handler.rs
+expression: formatted
+---
+pub struct EventEnvelope {
+    pub event: CustomEvent,
+    pub span: ::tracing::Span,
+}
+#[derive(::serde::Serialize, ::serde::Deserialize, Clone)]
+pub enum CustomEvent {
+    EventFields {
+        id: ::uuid::Uuid,
+        value: u32,
+        #[serde(skip)]
+        arc: Option<Arc<Something>>,
+    },
+}
+impl From<CustomEvent> for EventEnvelope {
+    fn from(input: CustomEvent) -> EventEnvelope {
+        EventEnvelope {
+            span: ::tracing::Span::current(),
+            event: input,
+        }
+    }
+}
+impl std::fmt::Debug for CustomEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CustomEvent::EventFields { .. } => write!(f, stringify!(EventFields)),
+            _ => write!(f, "Unknown Event"),
+        }
+    }
+}
+impl EventHandler {
+    async fn test_processor_5(
+        &self,
+        env: EventEnvelope,
+        #[allow(unused)]
+        queue: &mut ::std::collections::VecDeque<EventEnvelope>,
+    ) {
+        let CustomEvent::EventFields { id, value, arc } = env.event else {
+            unreachable!();
+        };
+        self.event_preprocess(&env.event);
+        {
+            println!("Hello world!");
+        }
+    }
+    fn event_preprocess(&self, _event: &CustomEvent) {}
+    #[tracing::instrument(skip_all, parent = &env.span)]
+    pub async fn handle(
+        &self,
+        env: EventEnvelope,
+        queue: &mut ::std::collections::VecDeque<EventEnvelope>,
+    ) {
+        use CustomEvent::*;
+        tracing::debug!("handle: {:?}", env.event);
+        match env.event {
+            CustomEvent::EventFields { .. } => self.test_processor_5(env, queue).await,
+        };
+    }
+    pub async fn run(&self, mut rx: ::tokio::sync::mpsc::Receiver<EventEnvelope>) {
+        let mut queue: ::std::collections::VecDeque<EventEnvelope> = ::std::collections::VecDeque::new();
+        loop {
+            match rx.recv().await {
+                Some(envelope) => queue.push_back(envelope),
+                None => {
+                    tracing::error!("event channel closed unexpectedly");
+                    break;
+                }
+            }
+            while let Ok(envelope) = rx.try_recv() {
+                queue.push_back(envelope);
+            }
+            while let Some(envelope) = queue.pop_front() {
+                self.handle(envelope, &mut queue).await;
+            }
+        }
+    }
+}

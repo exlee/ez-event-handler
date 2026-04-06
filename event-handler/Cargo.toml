@@ -1,0 +1,11 @@
+[package]
+name = "event-handler"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+event-handler-macro = {path = "../macros" }
+serde = { version = "1.0.228", features = ["derive"] }
+tokio = { version = "1.51.0", features = ["full"] }
+tracing = "0.1.44"
+uuid = { version = "1.23.0", features = ["v4", "serde"] }

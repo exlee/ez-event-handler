@@ -1,0 +1,64 @@
+---
+source: src/event_handler.rs
+expression: formatted
+---
+pub struct EEEEnvelope {
+    pub event: CustomEvent,
+    pub span: ::tracing::Span,
+}
+#[derive(Serialize, Deserialize, Clone)]
+pub enum CustomEvent {
+    EventFields { value: u32 },
+}
+impl std::fmt::Debug for CustomEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CustomEvent::EventFields { .. } => write!(f, stringify!(EventFields)),
+            _ => write!(f, "Unknown Event"),
+        }
+    }
+}
+impl EventHandler {
+    fn test_processor_6(
+        &self,
+        env: EEEEnvelope,
+        queue: &mut ::std::collections::VecDeque<EEEEnvelope>,
+    ) {
+        let CustomEvent::EventFields { value } = env.event else {
+            unreachable!();
+        };
+        {
+            println!("Hello world!");
+        }
+    }
+    #[tracing::instrument(skip_all, parent = &env.span)]
+    async fn handle(
+        &self,
+        env: EEEEnvelope,
+        queue: &mut ::std::collections::VecDeque<EEEEnvelope>,
+    ) {
+        use CustomEvent::*;
+        tracing::debug!("handle: {:?}", env.event);
+        match env.event {
+            CustomEvent::EventFields { .. } => self.test_processor_6(env, queue),
+        }
+    }
+    async fn run(&self, mut rx: ::tokio::sync::mpsc::Receiver<EEEEnvelope>) {
+        let mut queue: ::std::collections::VecDeque<EEEEnvelope> = ::std::collections::VecDeque::new();
+        loop {
+            match rx.recv().await {
+                Some(envelope) => queue.push_back(envelope),
+                None => {
+                    tracing::error!("event channel closed unexpectedly");
+                    break;
+                }
+            }
+            while let Ok(envelope) = rx.try_recv() {
+                queue.push_back(envelope);
+            }
+            while let Some(envelope) = queue.pop_front() {
+                self.handle(envelope, &mut queue).await;
+            }
+        }
+    }
+}
