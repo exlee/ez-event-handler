@@ -10,6 +10,16 @@ pub struct EventEnvelope {
 pub enum Event {
     EventNoFields { id: ::uuid::Uuid },
 }
+impl Event {
+    pub fn new_event_no_fields(&self) -> EventEnvelope {
+        return EventEnvelope {
+            span: ::tracing::Span::current(),
+            event: Event::EventNoFields {
+                id: ::uuid::Uuid::new_v4(),
+            },
+        };
+    }
+}
 impl From<Event> for EventEnvelope {
     fn from(input: Event) -> EventEnvelope {
         EventEnvelope {

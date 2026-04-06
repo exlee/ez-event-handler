@@ -81,6 +81,7 @@ name = "event-handler-macro"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "heck",
  "insta",
  "prettyplease",
  "proc-macro2",

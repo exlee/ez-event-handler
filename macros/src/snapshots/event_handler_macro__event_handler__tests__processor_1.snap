@@ -10,6 +10,18 @@ pub struct EventEnvelope {
 pub enum Event {
     MyStruct { id: ::uuid::Uuid, item: String, value: u32 },
 }
+impl Event {
+    pub fn new_my_struct(&self, item: String, value: u32) -> EventEnvelope {
+        return EventEnvelope {
+            span: ::tracing::Span::current(),
+            event: Event::MyStruct {
+                id: ::uuid::Uuid::new_v4(),
+                item,
+                value,
+            },
+        };
+    }
+}
 impl From<Event> for EventEnvelope {
     fn from(input: Event) -> EventEnvelope {
         EventEnvelope {

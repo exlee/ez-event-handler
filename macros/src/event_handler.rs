@@ -104,6 +104,7 @@ struct ProcessorContext {
     debug_arms: Vec<TokenStream>,
     handlers: Vec<ImplItem>,
     events: Vec<Variant>,
+    event_new_methods: Vec<ImplItemFn>,
     args: HandlerArgs,
     errors: Vec<TokenStream>,
 }
@@ -139,6 +140,8 @@ impl ProcessorContext {
         for method in handler.generated_methods {
             self.handlers.push(method);
         }
+
+        self.event_new_methods.push(handler.event_new_method);
     }
 }
 
@@ -150,6 +153,7 @@ struct HandlerResult {
     generated_methods: Vec<ImplItem>,
     has_fields: bool,
     is_event_preprocess: bool,
+    event_new_method: syn::ImplItemFn,
 }
 
 fn process_handler_method(
@@ -190,6 +194,13 @@ fn process_handler_method(
     let has_fields = !pat_fields.is_empty();
     let event_envelope_ident = &args.get_envelope();
 
+    let event_new_method = create_event_method(
+        variant_ident.clone(),
+        &pat_fields,
+        &args.get_event(),
+        event_envelope_ident,
+    );
+
     let method_actual: ImplItem = parse_quote! {
         #(#method_attrs),*
         async fn #method_name(&self, env: #event_envelope_ident, #[allow(unused)] queue: &mut ::std::collections::VecDeque<#event_envelope_ident>) {
@@ -226,9 +237,52 @@ fn process_handler_method(
         method_name,
         event_variant,
         generated_methods,
+        event_new_method,
         has_fields,
         is_event_preprocess,
     }
+}
+
+fn create_event_method(
+    variant: Ident,
+    pat_fields: &[PatType],
+    event_ident: &Ident,
+    envelope_ident: &Ident,
+) -> syn::ImplItemFn {
+    let new_method_name = Ident::new(
+        &format!("new_{}", heck::AsSnakeCase(variant.to_string())),
+        variant.span(),
+    );
+
+    let mut args: Vec<FnArg> = Vec::new();
+    pat_fields
+        .iter()
+        .map(|pf| syn::FnArg::Typed(pf.clone()))
+        .for_each(|arg| args.push(arg));
+
+    let fields = pat_fields
+        .iter()
+        .filter_map(|pt| {
+            if let Pat::Ident(ident) = *pt.pat.clone() {
+                Some(ident.ident.to_token_stream())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let ts: syn::ImplItemFn = parse_quote! {
+        pub fn #new_method_name(#(#args),*) -> #envelope_ident {
+             return #envelope_ident {
+                 span: ::tracing::Span::current(),
+                 event: #event_ident::#variant {
+                     id: ::uuid::Uuid::new_v4(),
+                     #(#fields),*
+                 }
+             }
+        }
+    };
+    ts
 }
 
 fn analyze_method_inputs(
@@ -272,6 +326,12 @@ fn analyze_method_inputs(
     (envelope_ident, queue_ident, other_args)
 }
 
+fn add_extra_fields(vec: &mut Vec<Field>) {
+    let id_field = parse_quote! {
+        id: ::uuid::Uuid
+    };
+    vec.insert(0, id_field);
+}
 fn create_event_variant(ident: Ident, pat_fields: &[PatType]) -> Variant {
     let mut fields_vec: Vec<Field> = pat_fields
         .iter()
@@ -290,11 +350,8 @@ fn create_event_variant(ident: Ident, pat_fields: &[PatType]) -> Variant {
             }
         })
         .collect();
+    add_extra_fields(&mut fields_vec);
 
-    let id_field = parse_quote! {
-        id: ::uuid::Uuid
-    };
-    fields_vec.insert(0, id_field);
     let fields = if fields_vec.is_empty() {
         Fields::Unit
     } else {
@@ -346,6 +403,7 @@ fn generate_output(mut item_impl: ItemImpl, context: ProcessorContext) -> TokenS
         debug_arms,
         handlers,
         events,
+        event_new_methods,
         args,
         errors,
     } = context;
@@ -471,9 +529,22 @@ fn generate_output(mut item_impl: ItemImpl, context: ProcessorContext) -> TokenS
             }
         }
     };
+
+    let mut event_enum_impl = TokenStream::new();
+    if args.inherit_expr.is_none() {
+        let ei = args.get_event();
+        event_enum_impl = {
+            quote! {
+                impl #ei {
+                    #(#event_new_methods)*
+                }
+            }
+        };
+    }
     let out = quote! {
         #event_envelope
         #event_enum_ts
+        #event_enum_impl
         #event_into_envelope
         #debug_impl_ts
         #(#errors)*

@@ -10,6 +10,21 @@ pub struct EventEnvelope {
 pub enum Event {
     EventNoFieldsEnvArc { id: ::uuid::Uuid, #[serde(skip)] arc: Option<Arc<Something>> },
 }
+impl Event {
+    pub fn new_event_no_fields_env_arc(
+        &self,
+        #[serde(skip)]
+        arc: Option<Arc<Something>>,
+    ) -> EventEnvelope {
+        return EventEnvelope {
+            span: ::tracing::Span::current(),
+            event: Event::EventNoFieldsEnvArc {
+                id: ::uuid::Uuid::new_v4(),
+                arc,
+            },
+        };
+    }
+}
 impl From<Event> for EventEnvelope {
     fn from(input: Event) -> EventEnvelope {
         EventEnvelope {

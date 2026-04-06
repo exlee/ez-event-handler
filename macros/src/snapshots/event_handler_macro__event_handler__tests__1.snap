@@ -10,6 +10,17 @@ pub struct EventEnvelope {
 pub enum Event {
     Event1 { id: ::uuid::Uuid, #[serde(skip)] test: Vec<Vec<u32>> },
 }
+impl Event {
+    pub fn new_event1(&self, #[serde(skip)] test: Vec<Vec<u32>>) -> EventEnvelope {
+        return EventEnvelope {
+            span: ::tracing::Span::current(),
+            event: Event::Event1 {
+                id: ::uuid::Uuid::new_v4(),
+                test,
+            },
+        };
+    }
+}
 impl From<Event> for EventEnvelope {
     fn from(input: Event) -> EventEnvelope {
         EventEnvelope {

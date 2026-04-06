@@ -10,6 +10,17 @@ pub struct EEEEnvelope {
 pub enum CustomEvent {
     EventFields { id: ::uuid::Uuid, value: u32 },
 }
+impl CustomEvent {
+    pub fn new_event_fields(&self, value: u32) -> EEEEnvelope {
+        return EEEEnvelope {
+            span: ::tracing::Span::current(),
+            event: CustomEvent::EventFields {
+                id: ::uuid::Uuid::new_v4(),
+                value,
+            },
+        };
+    }
+}
 impl From<CustomEvent> for EEEEnvelope {
     fn from(input: CustomEvent) -> EEEEnvelope {
         EEEEnvelope {

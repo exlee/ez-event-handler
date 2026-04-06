@@ -15,6 +15,23 @@ pub enum CustomEvent {
         arc: Option<Arc<Something>>,
     },
 }
+impl CustomEvent {
+    pub fn new_event_fields(
+        &self,
+        value: u32,
+        #[serde(skip)]
+        arc: Option<Arc<Something>>,
+    ) -> EventEnvelope {
+        return EventEnvelope {
+            span: ::tracing::Span::current(),
+            event: CustomEvent::EventFields {
+                id: ::uuid::Uuid::new_v4(),
+                value,
+                arc,
+            },
+        };
+    }
+}
 impl From<CustomEvent> for EventEnvelope {
     fn from(input: CustomEvent) -> EventEnvelope {
         EventEnvelope {
