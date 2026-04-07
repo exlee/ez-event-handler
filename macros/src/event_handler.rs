@@ -84,7 +84,7 @@ pub(crate) fn event_processor_impl(args: HandlerArgs, input: TokenStream) -> Tok
     let mut i = 0;
     while i < item_impl.items.len() {
         if let ImplItem::Fn(ref mut method) = item_impl.items[i] {
-            if let Some(attr) = find_and_remove_handler_attr(&mut method.attrs) {
+            if let Some(attr) = attrs::find_and_remove_handler_attr(&mut method.attrs) {
                 let handler = process_handler_method(&context.args, method, attr);
                 context.push_handler(handler);
                 item_impl.items.remove(i);
@@ -94,7 +94,7 @@ pub(crate) fn event_processor_impl(args: HandlerArgs, input: TokenStream) -> Tok
         i += 1;
     }
 
-    generate_output(item_impl, context)
+    codegen::generate_output(item_impl, context)
 }
 
 #[derive(Default)]
@@ -166,13 +166,14 @@ fn process_handler_method(
     let method_name = method.sig.ident.clone();
     let method_body = &method.block;
     let mut method_attrs = method.attrs.clone();
-    let is_impure = find_and_remove_impure_attr(&mut method_attrs).is_some();
-    let is_event_preprocess = find_and_remove_event_preprocess_attr(&mut method_attrs).is_some();
+    let is_impure = attrs::find_and_remove_impure_attr(&mut method_attrs).is_some();
+    let is_event_preprocess =
+        attrs::find_and_remove_event_preprocess_attr(&mut method_attrs).is_some();
 
     let (envelope_ident, queue_ident, other_args) = analyze_method_inputs(args, &method.sig.inputs);
 
     let span_assignment = envelope_ident
-        .map(|id| quote! { let #id = env; })
+        .map(|id| quote! { let #id = &env.span; })
         .unwrap_or_default();
     let queue_assignment = queue_ident
         .map(|id| quote! { let #id = queue; })
@@ -189,23 +190,27 @@ fn process_handler_method(
         })
         .collect();
 
-    let event_variant = create_event_variant(variant_ident.clone(), &pat_fields);
-    let guard_stmt = create_guard_statement(&variant_ident, &args.get_event(), &pat_fields);
+    let event_variant = codegen::create_event_variant(variant_ident.clone(), &pat_fields);
+    let guard_stmt =
+        codegen::create_guard_statement(&variant_ident, &args.get_event(), &pat_fields);
     let has_fields = !pat_fields.is_empty();
     let event_envelope_ident = &args.get_envelope();
 
-    let event_new_method = create_event_method(
+    let event_new_method = codegen::create_event_method(
         variant_ident.clone(),
         &pat_fields,
         &args.get_event(),
         event_envelope_ident,
+        span,
     );
+    let method_signature = quote_spanned! { method.sig.span() =>
+         async fn #method_name(&self, env: #event_envelope_ident, #[allow(unused)] queue: &mut ::std::collections::VecDeque<#event_envelope_ident>)
+    };
 
     let method_actual: ImplItem = parse_quote! {
         #(#method_attrs),*
-        async fn #method_name(&self, env: #event_envelope_ident, #[allow(unused)] queue: &mut ::std::collections::VecDeque<#event_envelope_ident>) {
+        #method_signature {
             #guard_stmt
-            self.event_preprocess(&env.event);
             #queue_assignment
             #span_assignment
             #method_body
@@ -241,48 +246,6 @@ fn process_handler_method(
         has_fields,
         is_event_preprocess,
     }
-}
-
-fn create_event_method(
-    variant: Ident,
-    pat_fields: &[PatType],
-    event_ident: &Ident,
-    envelope_ident: &Ident,
-) -> syn::ImplItemFn {
-    let new_method_name = Ident::new(
-        &format!("new_{}", heck::AsSnakeCase(variant.to_string())),
-        variant.span(),
-    );
-
-    let mut args: Vec<FnArg> = Vec::new();
-    pat_fields
-        .iter()
-        .map(|pf| syn::FnArg::Typed(pf.clone()))
-        .for_each(|arg| args.push(arg));
-
-    let fields = pat_fields
-        .iter()
-        .filter_map(|pt| {
-            if let Pat::Ident(ident) = *pt.pat.clone() {
-                Some(ident.ident.to_token_stream())
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
-
-    let ts: syn::ImplItemFn = parse_quote! {
-        pub fn #new_method_name(#(#args),*) -> #envelope_ident {
-             return #envelope_ident {
-                 span: ::tracing::Span::current(),
-                 event: #event_ident::#variant {
-                     id: ::uuid::Uuid::new_v4(),
-                     #(#fields),*
-                 }
-             }
-        }
-    };
-    ts
 }
 
 fn analyze_method_inputs(
@@ -325,253 +288,6 @@ fn analyze_method_inputs(
 
     (envelope_ident, queue_ident, other_args)
 }
-
-fn add_extra_fields(vec: &mut Vec<Field>) {
-    let id_field = parse_quote! {
-        id: ::uuid::Uuid
-    };
-    vec.insert(0, id_field);
-}
-fn create_event_variant(ident: Ident, pat_fields: &[PatType]) -> Variant {
-    let mut fields_vec: Vec<Field> = pat_fields
-        .iter()
-        .filter_map(|p| {
-            if let Pat::Ident(pat_ident) = &*p.pat {
-                Some(Field {
-                    attrs: p.attrs.clone(),
-                    vis: parse_quote!(),
-                    mutability: FieldMutability::None,
-                    ident: Some(pat_ident.ident.clone()),
-                    colon_token: None,
-                    ty: (*p.ty).clone(),
-                })
-            } else {
-                None
-            }
-        })
-        .collect();
-    add_extra_fields(&mut fields_vec);
-
-    let fields = if fields_vec.is_empty() {
-        Fields::Unit
-    } else {
-        Fields::Named(FieldsNamed {
-            brace_token: Default::default(),
-            named: fields_vec.into_iter().collect(),
-        })
-    };
-
-    Variant {
-        attrs: Vec::new(),
-        ident,
-        fields,
-        discriminant: None,
-    }
-}
-
-fn create_guard_statement(
-    variant_ident: &Ident,
-    event_ident: &Ident,
-    pat_fields: &[PatType],
-) -> TokenStream {
-    let field_names: Vec<_> = pat_fields
-        .iter()
-        .map(|pf| {
-            if let Pat::Ident(ident) = &*pf.pat {
-                quote! { #ident }
-            } else {
-                panic!("Expected identifier in function arguments")
-            }
-        })
-        .collect();
-
-    let match_pattern = if field_names.is_empty() {
-        quote! {}
-    } else {
-        quote! {{ id, #(#field_names),* }}
-    };
-
-    quote! {
-        let #event_ident::#variant_ident #match_pattern = env.event else { unreachable!(); };
-    }
-}
-
-fn generate_output(mut item_impl: ItemImpl, context: ProcessorContext) -> TokenStream {
-    let ProcessorContext {
-        event_preprocess,
-        match_arms,
-        debug_arms,
-        handlers,
-        events,
-        event_new_methods,
-        args,
-        errors,
-    } = context;
-    let ei = &args.get_event();
-    let event_envelope = &args.get_envelope();
-
-    let event_enum = ItemEnum {
-        attrs: parse_quote! { #[derive(::serde::Serialize, ::serde::Deserialize, Clone)] },
-        vis: parse_quote!(pub),
-        enum_token: Default::default(),
-        ident: args.get_event(),
-        generics: Default::default(),
-        brace_token: Default::default(),
-        variants: events.into_iter().collect(),
-    };
-
-    let debug_impl = quote! {
-        impl std::fmt::Debug for #ei {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                match self {
-                    #(#debug_arms),*
-                    ,_ => write!(f, "Unknown Event"),
-                }
-            }
-        }
-    };
-    item_impl.items.extend(handlers);
-
-    if !event_preprocess {
-        let ei = args.get_event();
-        item_impl.items.push(parse_quote! {
-            fn event_preprocess(&self, _event: &#ei){}
-
-        });
-    }
-    if let Some(inherit) = args.inherit_expr.clone() {
-        item_impl.items.push(parse_quote! {
-            #[tracing::instrument(skip_all,parent=&env.span)]
-            pub async fn handle(&self, env: #event_envelope, queue: &mut ::std::collections::VecDeque<#event_envelope>) {
-                use #ei::*;
-                tracing::debug!("handle: {:?}", env.event);
-                self.event_preprocess(&env.event);
-                match &env.event {
-                    #(#match_arms),*,
-                    _ => (#inherit).handle(env, queue).await,
-                };
-            }
-
-        });
-    } else {
-        item_impl.items.push(parse_quote! {
-            #[tracing::instrument(skip_all,parent=&env.span)]
-            pub async fn handle(&self, env: #event_envelope, queue: &mut ::std::collections::VecDeque<#event_envelope>) {
-                use #ei::*;
-                tracing::debug!("handle: {:?}", env.event);
-                match env.event {
-                    #(#match_arms),*
-                };
-            }
-        });
-    }
-
-    item_impl.items.push(parse_quote! {
-        pub async fn run(&self, mut rx: ::tokio::sync::mpsc::Receiver<#event_envelope>) {
-            let mut queue: ::std::collections::VecDeque<#event_envelope> = ::std::collections::VecDeque::new();
-            loop {
-                match rx.recv().await {
-                    Some(envelope) => queue.push_back(envelope),
-                    None => {
-                        tracing::error!("event channel closed unexpectedly");
-                        break;
-                    }
-                }
-                while let Ok(envelope) = rx.try_recv() {
-                    queue.push_back(envelope);
-                }
-                while let Some(envelope) = queue.pop_front() {
-                    self.handle(envelope, &mut queue).await;
-                }
-            }
-        }
-    });
-
-    item_impl
-        .attrs
-        .retain(|attr| !attr.path().is_ident("event_processor"));
-
-    let ei = args.get_event();
-    let ev = args.get_envelope();
-    let mut event_into_envelope = TokenStream::new();
-    if args.inherit_expr.is_none() {
-        event_into_envelope = quote! {
-            impl From<#ei> for #ev {
-               fn from(input: #ei) -> #ev {
-                   #ev {
-                       span: ::tracing::Span::current(),
-                       event: input
-                   }
-               }
-            }
-
-        };
-    };
-    let event_enum_ts = if args.inherit_expr.is_some() {
-        quote! {}
-    } else {
-        event_enum.to_token_stream()
-    };
-    let debug_impl_ts = if args.inherit_expr.is_some() {
-        quote! {}
-    } else {
-        debug_impl.to_token_stream()
-    };
-
-    let ei = args.get_event();
-    let event_envelope = if args.inherit_expr.is_some() {
-        quote! {}
-    } else {
-        quote! {
-            pub struct #event_envelope {
-                pub event: #ei,
-                pub span: ::tracing::Span,
-            }
-        }
-    };
-
-    let mut event_enum_impl = TokenStream::new();
-    if args.inherit_expr.is_none() {
-        let ei = args.get_event();
-        event_enum_impl = {
-            quote! {
-                impl #ei {
-                    #(#event_new_methods)*
-                }
-            }
-        };
-    }
-    let out = quote! {
-        #event_envelope
-        #event_enum_ts
-        #event_enum_impl
-        #event_into_envelope
-        #debug_impl_ts
-        #(#errors)*
-        #item_impl
-    };
-    out
-}
-
-fn find_and_remove_handler_attr(attrs: &mut Vec<Attribute>) -> Option<Attribute> {
-    let index = attrs
-        .iter()
-        .position(|attr| attr.path().is_ident("handler"))?;
-    Some(attrs.remove(index))
-}
-fn find_and_remove_impure_attr(attrs: &mut Vec<Attribute>) -> Option<Attribute> {
-    let index = attrs
-        .iter()
-        .position(|attr| attr.path().is_ident("impure"))?;
-    Some(attrs.remove(index))
-}
-fn find_and_remove_event_preprocess_attr(attrs: &mut Vec<Attribute>) -> Option<Attribute> {
-    let index = attrs
-        .iter()
-        .position(|attr| attr.path().is_ident("event_preprocess"))?;
-    Some(attrs.remove(index))
-}
-
 #[allow(unused)]
 fn pretty_print(tokens: proc_macro2::TokenStream) -> String {
     // 1. Parse the tokens into a syntax tree (syn::File)
@@ -583,6 +299,322 @@ fn pretty_print(tokens: proc_macro2::TokenStream) -> String {
     // 2. Format it
     prettyplease::unparse(&syntax_tree)
 }
+
+mod codegen {
+    use super::*;
+
+    pub fn create_guard_statement(
+        variant_ident: &Ident,
+        event_ident: &Ident,
+        pat_fields: &[PatType],
+    ) -> TokenStream {
+        let field_names: Vec<_> = pat_fields
+            .iter()
+            .map(|pf| {
+                if let Pat::Ident(ident) = &*pf.pat {
+                    quote! { #ident }
+                } else {
+                    panic!("Expected identifier in function arguments")
+                }
+            })
+            .collect();
+
+        let match_pattern = if field_names.is_empty() {
+            quote! {}
+        } else {
+            quote! {{ #(#field_names),* }}
+        };
+
+        quote! {
+            let #event_ident::#variant_ident #match_pattern = env.event else { unreachable!(); };
+        }
+    }
+
+    pub fn create_event_method(
+        variant: Ident,
+        pat_fields: &[PatType],
+        event_ident: &Ident,
+        envelope_ident: &Ident,
+        span: Span,
+    ) -> syn::ImplItemFn {
+        let new_method_name = Ident::new(
+            &format!("new_{}", heck::AsSnakeCase(variant.to_string())),
+            variant.span(),
+        );
+
+        let mut args: Vec<FnArg> = Vec::new();
+        pat_fields
+            .iter()
+            .map(|pf| syn::FnArg::Typed(pf.clone()))
+            .for_each(|arg| args.push(arg));
+
+        let fields = pat_fields
+            .iter()
+            .filter_map(|pt| {
+                if let Pat::Ident(ident) = *pt.pat.clone() {
+                    Some(ident.ident.to_token_stream())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let ts: syn::ImplItemFn = parse_quote_spanned! { span =>
+            pub fn #new_method_name(#(#args),*) -> #envelope_ident {
+                 return #envelope_ident {
+                     span: ::tracing::Span::current(),
+                     id: ::uuid::Uuid::new_v4(),
+                     event: #event_ident::#variant {
+                         #(#fields),*
+                     }
+                 }
+            }
+        };
+        ts
+    }
+
+    pub fn create_event_variant(ident: Ident, pat_fields: &[PatType]) -> Variant {
+        let fields_vec: Vec<Field> = pat_fields
+            .iter()
+            .filter_map(|p| {
+                if let Pat::Ident(pat_ident) = &*p.pat {
+                    Some(Field {
+                        attrs: p.attrs.clone(),
+                        vis: parse_quote!(),
+                        mutability: FieldMutability::None,
+                        ident: Some(pat_ident.ident.clone()),
+                        colon_token: None,
+                        ty: (*p.ty).clone(),
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let fields = if fields_vec.is_empty() {
+            Fields::Unit
+        } else {
+            Fields::Named(FieldsNamed {
+                brace_token: Default::default(),
+                named: fields_vec.into_iter().collect(),
+            })
+        };
+
+        Variant {
+            attrs: Vec::new(),
+            ident,
+            fields,
+            discriminant: None,
+        }
+    }
+
+    pub fn generate_output(mut item_impl: ItemImpl, context: ProcessorContext) -> TokenStream {
+        let ProcessorContext {
+            event_preprocess,
+            match_arms,
+            debug_arms,
+            handlers,
+            events,
+            event_new_methods,
+            args,
+            errors,
+        } = context;
+        let ei = &args.get_event();
+        let event_envelope = &args.get_envelope();
+
+        let event_enum = ItemEnum {
+            attrs: parse_quote! { #[derive(::serde::Serialize, ::serde::Deserialize, Clone)] },
+            vis: parse_quote!(pub),
+            enum_token: Default::default(),
+            ident: args.get_event(),
+            generics: Default::default(),
+            brace_token: Default::default(),
+            variants: events.into_iter().collect(),
+        };
+
+        let debug_impl = quote! {
+            impl std::fmt::Debug for #ei {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    match self {
+                        #(#debug_arms),*
+                        ,_ => write!(f, "Unknown Event"),
+                    }
+                }
+            }
+        };
+        item_impl.items.extend(handlers);
+
+        if !event_preprocess {
+            let ei = args.get_event();
+            item_impl.items.push(parse_quote! {
+                fn __event_preprocess(&self, _event: &mut #ei){}
+
+            });
+        }
+        item_impl
+            .items
+            .push(generate_handler_func(&args, &match_arms));
+
+        item_impl.items.push(generate_run_func(&args));
+
+        item_impl
+            .attrs
+            .retain(|attr| !attr.path().is_ident("event_processor"));
+
+        let event_into_envelope = generate_into_envelope(&args);
+
+        let event_enum_ts = if args.inherit_expr.is_some() {
+            quote! {}
+        } else {
+            event_enum.to_token_stream()
+        };
+        let debug_impl_ts = if args.inherit_expr.is_some() {
+            quote! {}
+        } else {
+            debug_impl.to_token_stream()
+        };
+
+        let ei = args.get_event();
+        let event_envelope = if args.inherit_expr.is_some() {
+            quote! {}
+        } else {
+            quote! {
+                pub struct #event_envelope {
+                    pub event: #ei,
+                    pub span: ::tracing::Span,
+                    pub id: ::uuid::Uuid,
+                }
+
+                impl #event_envelope {
+                    pub fn with_span(self, span: &::tracing::Span) -> Self {
+                        Self { span: span.clone(), ..self }
+                    }
+                }
+            }
+        };
+
+        let mut event_enum_impl = TokenStream::new();
+        if args.inherit_expr.is_none() {
+            let ei = args.get_event();
+            event_enum_impl = {
+                quote! {
+                    impl #ei {
+                        #(#event_new_methods)*
+                    }
+                }
+            };
+        }
+        let out = quote! {
+            #event_envelope
+            #event_enum_ts
+            #event_enum_impl
+            #event_into_envelope
+            #debug_impl_ts
+            #(#errors)*
+            #item_impl
+        };
+        out
+    }
+    pub fn generate_handler_func(args: &HandlerArgs, match_arms: &[TokenStream]) -> syn::ImplItem {
+        let event_envelope = args.get_envelope();
+        let ei = args.get_event();
+        if let Some(inherit) = args.inherit_expr.clone() {
+            parse_quote! {
+                #[tracing::instrument(skip_all,parent=&env.span)]
+                pub async fn handle(&self, mut env: #event_envelope, queue: &mut ::std::collections::VecDeque<#event_envelope>) {
+                    use #ei::*;
+                    tracing::debug!("handle: {:?}", &env.event);
+                    self.__event_preprocess(&mut env.event);
+                    match &env.event {
+                        #(#match_arms),*,
+                        _ => (#inherit).handle(env, queue).await,
+                    };
+                }
+
+            }
+        } else {
+            parse_quote! {
+                #[tracing::instrument(skip_all,parent=&env.span)]
+                pub async fn handle(&self, mut env: #event_envelope, queue: &mut ::std::collections::VecDeque<#event_envelope>) {
+                    use #ei::*;
+                    tracing::debug!("handle: {:?}", &env.event);
+                    self.__event_preprocess(&mut env.event);
+                    match env.event {
+                        #(#match_arms),*
+                    };
+                }
+            }
+        }
+    }
+
+    pub fn generate_run_func(args: &HandlerArgs) -> syn::ImplItem {
+        let event_envelope = args.get_envelope();
+        parse_quote! {
+            pub async fn run(&self, mut rx: ::tokio::sync::mpsc::Receiver<#event_envelope>) {
+                let mut queue: ::std::collections::VecDeque<#event_envelope> = ::std::collections::VecDeque::new();
+                loop {
+                    match rx.recv().await {
+                        Some(envelope) => queue.push_back(envelope),
+                        None => {
+                            tracing::error!("event channel closed unexpectedly");
+                            break;
+                        }
+                    }
+                    while let Ok(envelope) = rx.try_recv() {
+                        queue.push_back(envelope);
+                    }
+                    while let Some(envelope) = queue.pop_front() {
+                        self.handle(envelope, &mut queue).await;
+                    }
+                }
+            }
+        }
+    }
+    pub fn generate_into_envelope(args: &HandlerArgs) -> TokenStream {
+        let ev = args.get_envelope();
+        let ei = args.get_event();
+        let mut event_into_envelope = TokenStream::new();
+        if args.inherit_expr.is_none() {
+            event_into_envelope = quote! {
+                impl From<#ei> for #ev {
+                   fn from(input: #ei) -> #ev {
+                       #ev {
+                           span: ::tracing::Span::current(),
+                           id: ::uuid::Uuid::new_v4(),
+                           event: input
+                       }
+                   }
+                }
+
+            };
+        };
+        event_into_envelope
+    }
+}
+
+mod attrs {
+    use super::*;
+    pub fn find_and_remove_handler_attr(attrs: &mut Vec<Attribute>) -> Option<Attribute> {
+        let index = attrs
+            .iter()
+            .position(|attr| attr.path().is_ident("handler"))?;
+        Some(attrs.remove(index))
+    }
+    pub fn find_and_remove_impure_attr(attrs: &mut Vec<Attribute>) -> Option<Attribute> {
+        let index = attrs
+            .iter()
+            .position(|attr| attr.path().is_ident("impure"))?;
+        Some(attrs.remove(index))
+    }
+    pub fn find_and_remove_event_preprocess_attr(attrs: &mut Vec<Attribute>) -> Option<Attribute> {
+        let index = attrs
+            .iter()
+            .position(|attr| attr.path().is_ident("event_preprocess"))?;
+        Some(attrs.remove(index))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -757,6 +789,34 @@ mod tests {
         assert!(matches!(ha.event_envelope, Some(_)));
         let ident: syn::Ident = ha.event_envelope.unwrap();
         assert!(ident.to_string() == String::from("MyCustomEnvelope"));
+        Ok(())
+    }
+    #[test]
+    fn test_readme_example() -> anyhow::Result<()> {
+        let input = quote! {
+            impl EventHandler {
+                #[handler(UserAuthentication)]
+                fn authenticate_user(&self, username: String, password: String) {
+                    println!("Authenticating user: {} with provided credentials", username);
+                }
+                #[handler(DataValidation)]
+                fn validate_data(&self, data: Vec<String>, is_valid: bool) {
+                    println!("Validating data with {} items and validity status: {}", data.len(), is_valid);
+                }
+                #[handler(ResourceCleanup)]
+                fn cleanup_resources(&self, resources: Vec<&str>, force: bool) {
+                    println!("Cleaning up {} resources with force flag: {}", resources.len(), force);
+                }
+                #[handler(NotificationSending)]
+                fn send_notification(&self, recipient: &str, message: String) {
+                    println!("Sending notification to {} with message: {}", recipient, message);
+                }
+            }
+
+        };
+        let output = event_processor_impl(HandlerArgs::default(), input);
+        let formatted = pretty_print(output);
+        insta::assert_snapshot!(formatted);
         Ok(())
     }
 }

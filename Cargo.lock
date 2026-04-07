@@ -66,10 +66,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "event-handler"
+name = "ez-event-handler"
 version = "0.1.0"
 dependencies = [
- "event-handler-macro",
+ "ez-event-handler-macro",
  "serde",
  "tokio",
  "tracing",
@@ -77,7 +77,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "event-handler-macro"
+name = "ez-event-handler-examples"
+version = "0.1.0"
+dependencies = [
+ "ez-event-handler-macro",
+ "serde",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "ez-event-handler-macro"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -213,17 +224,6 @@ name = "log"
 version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
-
-[[package]]
-name = "macros_examples"
-version = "0.1.0"
-dependencies = [
- "event-handler-macro",
- "serde",
- "tokio",
- "tracing",
- "uuid",
-]
 
 [[package]]
 name = "memchr"

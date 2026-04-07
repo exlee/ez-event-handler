@@ -1,4 +1,4 @@
-pub use event_handler_macro::event_processor;
+pub use ez_event_handler_macro::event_processor;
 
 pub async fn spawn<F, ENV>(f: F, size: usize) -> ::tokio::sync::mpsc::Sender<ENV>
 where
